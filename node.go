@@ -259,9 +259,6 @@ func (n *node) splitTwo(pageSize uintptr) (*node, *node) {
 	next.inodes = n.inodes[splitIndex:]
 	n.inodes = n.inodes[:splitIndex]
 
-	// Update the statistics.
-	n.bucket.tx.stats.IncSplit(1)
-
 	return n, next
 }
 
@@ -345,9 +342,6 @@ func (n *node) spill() error {
 			node.key = node.inodes[0].Key()
 			common.Assert(len(node.key) > 0, "spill: zero-length node key")
 		}
-
-		// Update the statistics.
-		tx.stats.IncSpill(1)
 	}
 
 	// If the root node split and created a new root then we need to spill that
@@ -367,9 +361,6 @@ func (n *node) rebalance() {
 		return
 	}
 	n.unbalanced = false
-
-	// Update statistics.
-	n.bucket.tx.stats.IncRebalance(1)
 
 	// Ignore if node is above threshold (25% when FillPercent is set to DefaultFillPercent) and has enough keys.
 	var threshold = int(float64(n.bucket.tx.db.pageSize)*n.bucket.FillPercent) / 2
@@ -485,9 +476,6 @@ func (n *node) dereference() {
 	for _, child := range n.children {
 		child.dereference()
 	}
-
-	// Update statistics.
-	n.bucket.tx.stats.IncNodeDeref(1)
 }
 
 // free adds the node's underlying page to the freelist.

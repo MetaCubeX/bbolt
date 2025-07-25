@@ -72,9 +72,6 @@ func (b *Bucket) Writable() bool {
 // The cursor is only valid as long as the transaction is open.
 // Do not use a cursor after the transaction is closed.
 func (b *Bucket) Cursor() *Cursor {
-	// Update transaction statistics.
-	b.tx.stats.IncCursorCount(1)
-
 	// Allocate and return a cursor.
 	return &Cursor{
 		bucket: b,
@@ -610,88 +607,6 @@ func (b *Bucket) ForEachBucket(fn func(k []byte) error) error {
 	return nil
 }
 
-// Stats returns stats on a bucket.
-func (b *Bucket) Stats() BucketStats {
-	var s, subStats BucketStats
-	pageSize := b.tx.db.pageSize
-	s.BucketN += 1
-	if b.RootPage() == 0 {
-		s.InlineBucketN += 1
-	}
-	b.forEachPage(func(p *common.Page, depth int, pgstack []common.Pgid) {
-		if p.IsLeafPage() {
-			s.KeyN += int(p.Count())
-
-			// used totals the used bytes for the page
-			used := common.PageHeaderSize
-
-			if p.Count() != 0 {
-				// If page has any elements, add all element headers.
-				used += common.LeafPageElementSize * uintptr(p.Count()-1)
-
-				// Add all element key, value sizes.
-				// The computation takes advantage of the fact that the position
-				// of the last element's key/value equals to the total of the sizes
-				// of all previous elements' keys and values.
-				// It also includes the last element's header.
-				lastElement := p.LeafPageElement(p.Count() - 1)
-				used += uintptr(lastElement.Pos() + lastElement.Ksize() + lastElement.Vsize())
-			}
-
-			if b.RootPage() == 0 {
-				// For inlined bucket just update the inline stats
-				s.InlineBucketInuse += int(used)
-			} else {
-				// For non-inlined bucket update all the leaf stats
-				s.LeafPageN++
-				s.LeafInuse += int(used)
-				s.LeafOverflowN += int(p.Overflow())
-
-				// Collect stats from sub-buckets.
-				// Do that by iterating over all element headers
-				// looking for the ones with the bucketLeafFlag.
-				for i := uint16(0); i < p.Count(); i++ {
-					e := p.LeafPageElement(i)
-					if (e.Flags() & common.BucketLeafFlag) != 0 {
-						// For any bucket element, open the element value
-						// and recursively call Stats on the contained bucket.
-						subStats.Add(b.openBucket(e.Value()).Stats())
-					}
-				}
-			}
-		} else if p.IsBranchPage() {
-			s.BranchPageN++
-			lastElement := p.BranchPageElement(p.Count() - 1)
-
-			// used totals the used bytes for the page
-			// Add header and all element headers.
-			used := common.PageHeaderSize + (common.BranchPageElementSize * uintptr(p.Count()-1))
-
-			// Add size of all keys and values.
-			// Again, use the fact that last element's position equals to
-			// the total of key, value sizes of all previous elements.
-			used += uintptr(lastElement.Pos() + lastElement.Ksize())
-			s.BranchInuse += int(used)
-			s.BranchOverflowN += int(p.Overflow())
-		}
-
-		// Keep track of maximum page depth.
-		if depth+1 > s.Depth {
-			s.Depth = depth + 1
-		}
-	})
-
-	// Alloc stats can be computed from page counts and pageSize.
-	s.BranchAlloc = (s.BranchPageN + s.BranchOverflowN) * pageSize
-	s.LeafAlloc = (s.LeafPageN + s.LeafOverflowN) * pageSize
-
-	// Add the max depth of sub-buckets to get total nested depth.
-	s.Depth += subStats.Depth
-	// Add the stats for all sub-buckets
-	s.Add(subStats)
-	return s
-}
-
 // forEachPage iterates over every page in a bucket, including inline pages.
 func (b *Bucket) forEachPage(fn func(*common.Page, int, []common.Pgid)) {
 	// If we have an inline page then just use that.
@@ -888,9 +803,6 @@ func (b *Bucket) node(pgId common.Pgid, parent *node) *node {
 	n.read(p)
 	b.nodes[pgId] = n
 
-	// Update statistics.
-	b.tx.stats.IncNodeCount(1)
-
 	return n
 }
 
@@ -946,49 +858,6 @@ func (b *Bucket) pageNode(id common.Pgid) (*common.Page, *node) {
 
 	// Finally lookup the page from the transaction if no node is materialized.
 	return b.tx.page(id), nil
-}
-
-// BucketStats records statistics about resources used by a bucket.
-type BucketStats struct {
-	// Page count statistics.
-	BranchPageN     int // number of logical branch pages
-	BranchOverflowN int // number of physical branch overflow pages
-	LeafPageN       int // number of logical leaf pages
-	LeafOverflowN   int // number of physical leaf overflow pages
-
-	// Tree statistics.
-	KeyN  int // number of keys/value pairs
-	Depth int // number of levels in B+tree
-
-	// Page size utilization.
-	BranchAlloc int // bytes allocated for physical branch pages
-	BranchInuse int // bytes actually used for branch data
-	LeafAlloc   int // bytes allocated for physical leaf pages
-	LeafInuse   int // bytes actually used for leaf data
-
-	// Bucket statistics
-	BucketN           int // total number of buckets including the top bucket
-	InlineBucketN     int // total number on inlined buckets
-	InlineBucketInuse int // bytes used for inlined buckets (also accounted for in LeafInuse)
-}
-
-func (s *BucketStats) Add(other BucketStats) {
-	s.BranchPageN += other.BranchPageN
-	s.BranchOverflowN += other.BranchOverflowN
-	s.LeafPageN += other.LeafPageN
-	s.LeafOverflowN += other.LeafOverflowN
-	s.KeyN += other.KeyN
-	if s.Depth < other.Depth {
-		s.Depth = other.Depth
-	}
-	s.BranchAlloc += other.BranchAlloc
-	s.BranchInuse += other.BranchInuse
-	s.LeafAlloc += other.LeafAlloc
-	s.LeafInuse += other.LeafInuse
-
-	s.BucketN += other.BucketN
-	s.InlineBucketN += other.InlineBucketN
-	s.InlineBucketInuse += other.InlineBucketInuse
 }
 
 // cloneBytes returns a copy of a given slice.

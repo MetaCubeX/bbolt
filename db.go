@@ -36,12 +36,6 @@ const (
 // All data access is performed through transactions which can be obtained through the DB.
 // All the functions on DB will return a ErrDatabaseNotOpen if accessed before Open() is called.
 type DB struct {
-	// Put `stats` at the first field to ensure it's 64-bit aligned. Note that
-	// the first word in an allocated struct can be relied upon to be 64-bit
-	// aligned. Refer to https://pkg.go.dev/sync/atomic#pkg-note-BUG. Also
-	// refer to discussion in https://github.com/etcd-io/bbolt/issues/577.
-	stats Stats
-
 	// When enabled, the database will perform a Check() after every commit.
 	// A panic is issued if the database is in an inconsistent state. This
 	// flag has a large performance impact so it should only be used for
@@ -145,7 +139,6 @@ type DB struct {
 	rwlock   sync.Mutex   // Allows only one writer at a time.
 	metalock sync.Mutex   // Protects meta page access.
 	mmaplock sync.RWMutex // Protects mmap access during remapping.
-	statlock sync.RWMutex // Protects stats access.
 
 	ops struct {
 		writeAt func(b []byte, off int64) (n int, err error)
@@ -424,7 +417,6 @@ func (db *DB) loadFreelist() {
 			// Read free list from freelist page.
 			db.freelist.Read(db.page(db.meta().Freelist()))
 		}
-		db.stats.FreePageN = db.freelist.FreeCount()
 	})
 }
 
@@ -796,19 +788,12 @@ func (db *DB) beginTx() (*Tx, error) {
 
 	// Keep track of transaction until it closes.
 	db.txs = append(db.txs, t)
-	n := len(db.txs)
 	if db.freelist != nil {
 		db.freelist.AddReadonlyTXID(t.meta.Txid())
 	}
 
 	// Unlock the meta pages.
 	db.metalock.Unlock()
-
-	// Update the transaction stats.
-	db.statlock.Lock()
-	db.stats.TxN++
-	db.stats.OpenTxN = n
-	db.statlock.Unlock()
 
 	return t, nil
 }
@@ -866,19 +851,12 @@ func (db *DB) removeTx(tx *Tx) {
 			break
 		}
 	}
-	n := len(db.txs)
 	if db.freelist != nil {
 		db.freelist.RemoveReadonlyTXID(tx.meta.Txid())
 	}
 
 	// Unlock the meta pages.
 	db.metalock.Unlock()
-
-	// Merge statistics.
-	db.statlock.Lock()
-	db.stats.OpenTxN = n
-	db.stats.TxStats.add(&tx.stats)
-	db.statlock.Unlock()
 }
 
 // Update executes a function within the context of a read-write managed transaction.
@@ -1091,14 +1069,6 @@ func (db *DB) Sync() (err error) {
 	}
 
 	return fdatasync(db)
-}
-
-// Stats retrieves ongoing performance stats for the database.
-// This is only updated when a transaction closes.
-func (db *DB) Stats() Stats {
-	db.statlock.RLock()
-	defer db.statlock.RUnlock()
-	return db.stats
 }
 
 // This is for internal access to the raw data bytes from the C cursor, use
@@ -1354,42 +1324,6 @@ var DefaultOptions = &Options{
 	Timeout:      0,
 	NoGrowSync:   false,
 	FreelistType: FreelistArrayType,
-}
-
-// Stats represents statistics about the database.
-type Stats struct {
-	// Put `TxStats` at the first field to ensure it's 64-bit aligned. Note
-	// that the first word in an allocated struct can be relied upon to be
-	// 64-bit aligned. Refer to https://pkg.go.dev/sync/atomic#pkg-note-BUG.
-	// Also refer to discussion in https://github.com/etcd-io/bbolt/issues/577.
-	TxStats TxStats // global, ongoing stats.
-
-	// Freelist stats
-	FreePageN     int // total number of free pages on the freelist
-	PendingPageN  int // total number of pending pages on the freelist
-	FreeAlloc     int // total bytes allocated in free pages
-	FreelistInuse int // total bytes used by the freelist
-
-	// Transaction stats
-	TxN     int // total number of started read transactions
-	OpenTxN int // number of currently open read transactions
-}
-
-// Sub calculates and returns the difference between two sets of database stats.
-// This is useful when obtaining stats at two different points and time and
-// you need the performance counters that occurred within that time span.
-func (s *Stats) Sub(other *Stats) Stats {
-	if other == nil {
-		return *s
-	}
-	var diff Stats
-	diff.FreePageN = s.FreePageN
-	diff.PendingPageN = s.PendingPageN
-	diff.FreeAlloc = s.FreeAlloc
-	diff.FreelistInuse = s.FreelistInuse
-	diff.TxN = s.TxN - other.TxN
-	diff.TxStats = s.TxStats.Sub(&other.TxStats)
-	return diff
 }
 
 type Info struct {
