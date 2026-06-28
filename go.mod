@@ -6,7 +6,6 @@ toolchain go1.25.11
 
 require (
 	github.com/stretchr/testify v1.11.1
-	go.etcd.io/gofail v0.2.0
 	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.45.0
 )
