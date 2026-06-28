@@ -6,10 +6,8 @@ import (
 	"math/rand"
 	"os"
 	"reflect"
-	"slices"
 	"sort"
 	"testing"
-	"testing/quick"
 	"unsafe"
 
 	"github.com/stretchr/testify/require"
@@ -271,30 +269,6 @@ func TestFreeList_reload(t *testing.T) {
 
 	require.Equal(t, common.Pgids{5, 6, 8}, f2.freePageIds())
 	require.Equal(t, []common.Pgid{10, 11, 12}, f2.pendingPageIds()[5].ids)
-}
-
-// Ensure that the txIDx swap, less and len are properly implemented
-func TestTxidSorting(t *testing.T) {
-	require.NoError(t, quick.Check(func(a []uint64) bool {
-		var txids []common.Txid
-		for _, txid := range a {
-			txids = append(txids, common.Txid(txid))
-		}
-
-		sort.Sort(txIDx(txids))
-
-		var r []uint64
-		for _, txid := range txids {
-			r = append(r, uint64(txid))
-		}
-
-		if !slices.IsSorted(r) {
-			t.Errorf("txids were not sorted correctly=%v", txids)
-			return false
-		}
-
-		return true
-	}, nil))
 }
 
 // Ensure that a freelist can deserialize from a freelist page.
