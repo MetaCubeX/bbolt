@@ -542,7 +542,7 @@ func (tx *Tx) write() error {
 			}
 			buf := common.UnsafeByteSlice(unsafe.Pointer(p), written, 0, int(sz))
 
-			if _, err := tx.db.ops.writeAt(buf, offset); err != nil {
+			if _, err := tx.db.writeAt(buf, offset); err != nil {
 				lg.Errorf("writeAt failed, offset: %d: %w", offset, err)
 				return err
 			}
@@ -604,7 +604,7 @@ func (tx *Tx) writeMeta() error {
 
 	// Write the meta page to file.
 	tx.db.metalock.Lock()
-	if _, err := tx.db.ops.writeAt(buf, int64(p.Id())*int64(tx.db.pageSize)); err != nil {
+	if _, err := tx.db.writeAt(buf, int64(p.Id())*int64(tx.db.pageSize)); err != nil {
 		tx.db.metalock.Unlock()
 		lg.Errorf("writeAt failed, pgid: %d, pageSize: %d, error: %v", p.Id(), tx.db.pageSize, err)
 		return err

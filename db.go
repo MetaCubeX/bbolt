@@ -121,10 +121,9 @@ type DB struct {
 	path     string
 	openFile func(string, int, os.FileMode) (*os.File, error)
 	file     *os.File
-	// `dataref` isn't used at all on Windows, and the golangci-lint
-	// always fails on Windows platform.
+	// dataref keeps the mapped byte slice on Unix, or the heap mirror used by mmap fallback.
 	//nolint
-	dataref  []byte // mmap'ed readonly, write throws SEGV
+	dataref  []byte
 	data     *[common.MaxMapSize]byte
 	datasz   int
 	meta0    *common.Meta
@@ -154,6 +153,8 @@ type DB struct {
 	// Read only mode.
 	// When true, Update() and Begin(true) return ErrDatabaseReadOnly immediately.
 	readOnly bool
+
+	mmapFallback bool
 }
 
 // Path returns the path to currently open database file.
@@ -514,8 +515,16 @@ func (db *DB) mmap(minsz int) (err error) {
 	// gofail: var mapError string
 	// return errors.New(mapError)
 	if err = mmap(db, size); err != nil {
-		lg.Errorf("[GOOS: %s, GOARCH: %s] mmap failed, size: %d, error: %v", runtime.GOOS, runtime.GOARCH, size, err)
-		return err
+		if !isMmapUnsupported(err) {
+			lg.Errorf("[GOOS: %s, GOARCH: %s] mmap failed, size: %d, error: %v", runtime.GOOS, runtime.GOARCH, size, err)
+			return err
+		}
+		mmapErr := err
+		lg.Warningf("[GOOS: %s, GOARCH: %s] mmap unsupported, size: %d, falling back to heap mirror: %v", runtime.GOOS, runtime.GOARCH, size, mmapErr)
+		if err = mmapFallback(db, size); err != nil {
+			lg.Errorf("[GOOS: %s, GOARCH: %s] mmap fallback failed, size: %d, mmap error: %v, fallback error: %v", runtime.GOOS, runtime.GOARCH, size, mmapErr, err)
+			return fmt.Errorf("mmap unsupported: %v; fallback error: %w", mmapErr, err)
+		}
 	}
 
 	// Perform unmmap on any error to reset all data fields:
@@ -556,6 +565,7 @@ func (db *DB) invalidate() {
 	db.dataref = nil
 	db.data = nil
 	db.datasz = 0
+	db.mmapFallback = false
 
 	db.meta0 = nil
 	db.meta1 = nil
@@ -567,12 +577,28 @@ func (db *DB) munmap() error {
 
 	// gofail: var unmapError string
 	// return errors.New(unmapError)
-	if err := munmap(db); err != nil {
+	var err error
+	if db.mmapFallback {
+		err = munmapFallback(db)
+	} else {
+		err = munmap(db)
+	}
+	if err != nil {
 		db.Logger().Errorf("[GOOS: %s, GOARCH: %s] munmap failed, db.datasz: %d, error: %v", runtime.GOOS, runtime.GOARCH, db.datasz, err)
 		return fmt.Errorf("unmap error: %w", err)
 	}
 
 	return nil
+}
+
+func (db *DB) writeAt(b []byte, off int64) (int, error) {
+	n, err := db.ops.writeAt(b, off)
+	if n > 0 && db.mmapFallback {
+		db.mmaplock.Lock()
+		db.copyToMmapFallback(b[:n], off)
+		db.mmaplock.Unlock()
+	}
+	return n, err
 }
 
 // mmapSize determines the appropriate size for the mmap given the current size
@@ -676,7 +702,7 @@ func (db *DB) init() error {
 	p.SetCount(0)
 
 	// Write the buffer to our data file.
-	if _, err := db.ops.writeAt(buf, 0); err != nil {
+	if _, err := db.writeAt(buf, 0); err != nil {
 		db.Logger().Errorf("writeAt failed: %w", err)
 		return err
 	}

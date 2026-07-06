@@ -55,6 +55,35 @@ func TestOpenWithPreLoadFreelist(t *testing.T) {
 	}
 }
 
+func TestMmapFallbackReadWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "db")
+	db, err := Open(path, 0600, nil)
+	require.NoError(t, err)
+	defer db.Close()
+
+	sz := db.datasz
+	require.NoError(t, db.munmap())
+	require.NoError(t, mmapFallback(db, sz))
+	db.meta0 = db.page(0).Meta()
+	db.meta1 = db.page(1).Meta()
+
+	require.True(t, db.mmapFallback)
+	require.NoError(t, db.Update(func(tx *Tx) error {
+		bucket, err := tx.CreateBucket([]byte("widgets"))
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte("key"), []byte("value"))
+	}))
+
+	require.NoError(t, db.View(func(tx *Tx) error {
+		bucket := tx.Bucket([]byte("widgets"))
+		require.NotNil(t, bucket)
+		require.Equal(t, []byte("value"), bucket.Get([]byte("key")))
+		return nil
+	}))
+}
+
 func TestMethodPage(t *testing.T) {
 	testCases := []struct {
 		name            string

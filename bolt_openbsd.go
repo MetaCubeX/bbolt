@@ -9,7 +9,7 @@ func msync(db *DB) error {
 }
 
 func fdatasync(db *DB) error {
-	if db.data != nil {
+	if db.data != nil && !db.mmapFallback {
 		return msync(db)
 	}
 	return db.file.Sync()
